@@ -11,8 +11,12 @@ define Package/$(PKG_NAME)
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=Hotkey per-device speed limit (lightweight web page)
-  DEPENDS:=+rpcd +uhttpd-mod-ubus +nftables
+  DEPENDS:=+rpcd +uhttpd-mod-ubus +nftables-json
   PKGARCH:=all
+endef
+
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
 endef
 
 define Build/Compile
@@ -20,9 +24,9 @@ endef
 
 define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/www/hotkey-limit $(1)/usr/libexec/rpcd $(1)/usr/share/rpcd/acl.d
-	$(INSTALL_DATA) ./root/www/hotkey-limit/index.html $(1)/www/hotkey-limit/
-	$(INSTALL_BIN) ./root/usr/libexec/rpcd/hotkeylimit $(1)/usr/libexec/rpcd/
-	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/hotkeylimit.json $(1)/usr/share/rpcd/acl.d/
+	$(INSTALL_DATA) $(CURDIR)/root/www/hotkey-limit/index.html $(1)/www/hotkey-limit/
+	$(INSTALL_BIN) $(CURDIR)/root/usr/libexec/rpcd/hotkeylimit $(1)/usr/libexec/rpcd/
+	$(INSTALL_DATA) $(CURDIR)/root/usr/share/rpcd/acl.d/hotkeylimit.json $(1)/usr/share/rpcd/acl.d/
 endef
 
 define Package/$(PKG_NAME)/postinst

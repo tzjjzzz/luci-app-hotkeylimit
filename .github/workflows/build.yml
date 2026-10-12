@@ -1,34 +1,58 @@
-name: build-ipk
+name: Build APK
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+env:
+  PACKAGE_NAME: luci-app-hotkeylimit
+  SDK_DIR: /home/runner/work/openwrt-sdk
+  OPENWRT_VERSION: 'v25.12.0-rc1'
 permissions:
   contents: write
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare feed
+      - name: Install dependencies
         run: |
-          mkdir -p feed/luci-app-hotkeylimit
-          cp -r Makefile root feed/luci-app-hotkeylimit/
-      - uses: openwrt/gh-action-sdk@main
-        continue-on-error: true
-        id: sdk
-        env:
-          ARCH: x86_64-openwrt-23.05
-          FEED_DIR: ${{ github.workspace }}/feed
-          PACKAGES: luci-app-hotkeylimit
-          NO_DEFAULT_FEEDS: 1
-      - name: Publish ipk and logs to release
+          sudo apt-get update
+          sudo apt-get install -y build-essential rsync unzip zstd python3-pyelftools
+      - name: Cache OpenWrt SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SDK_DIR }}
+          key: ${{ runner.os }}-sdk-apk-hotkeylimit-${{ env.OPENWRT_VERSION }}
+      - name: Download SDK and update feeds
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          v="${OPENWRT_VERSION#v}"
+          url="https://downloads.openwrt.org/releases/${v}/targets/x86/64"
+          f=$(curl -s "$url/" | grep -o '<a href="openwrt-sdk-.*-x86_64\.tar\.\(xz\|zst\)">' | sed -e 's/.*<a href="//' -e 's/">//' | head -n 1)
+          [ -n "$f" ] || { echo "::error::SDK not found at $url"; exit 1; }
+          wget -q "$url/$f"; tar -xf "$f"
+          mv $(find . -maxdepth 1 -type d -name 'openwrt-sdk-*') ${SDK_DIR}
+          cd ${SDK_DIR}
+          sed -i 's|https://git.openwrt.org/openwrt/openwrt.git|https://github.com/openwrt/openwrt.git|g;s|https://git.openwrt.org/feed/packages.git|https://github.com/openwrt/packages.git|g;s|https://git.openwrt.org/project/luci.git|https://github.com/openwrt/luci.git|g;s|https://git.openwrt.org/feed/routing.git|https://github.com/openwrt/routing.git|g;s|https://git.openwrt.org/feed/telephony.git|https://github.com/openwrt/telephony.git|g' feeds.conf.default
+          for i in 1 2 3; do ./scripts/feeds update -a && break || sleep 30; done
+          ./scripts/feeds install -a
+      - name: Compile
+        working-directory: ${{ env.SDK_DIR }}
+        run: |
+          rm -rf package/${PACKAGE_NAME}; mkdir -p package/${PACKAGE_NAME}
+          rsync -a --exclude .git --exclude .github "${{ github.workspace }}"/ package/${PACKAGE_NAME}/
+          echo "CONFIG_PACKAGE_${PACKAGE_NAME}=m" > .config
+          make defconfig
+          set -o pipefail
+          make package/${PACKAGE_NAME}/compile V=s -j$(($(nproc)+1)) 2>&1 | tee /tmp/build.log
+      - name: Publish to release
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p out
-          find bin -name '*.ipk' -exec cp {} out/ \; 2>/dev/null || true
-          [ -d logs ] && tar czf out/build-logs.tgz logs || true
-          echo "sdk outcome: ${{ steps.sdk.outcome }}" > out/outcome.txt
+          find ${SDK_DIR}/bin/packages -name "${PACKAGE_NAME}*.apk" -exec cp {} out/ \; 2>/dev/null || true
+          tail -n 200 /tmp/build.log > out/build-tail.log 2>/dev/null || true
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest out/* --title latest --notes "build ${{ steps.sdk.outcome }}"
+          gh release create latest out/* --title latest --notes "apk build"
