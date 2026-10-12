@@ -1,0 +1,23 @@
+name: build-ipk
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare feed
+        run: |
+          mkdir -p feed/luci-app-hotkeylimit
+          cp -r Makefile root feed/luci-app-hotkeylimit/
+      - uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: x86_64-openwrt-23.05
+          FEED_DIR: ${{ github.workspace }}/feed
+          PACKAGES: luci-app-hotkeylimit
+          NO_DEFAULT_FEEDS: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-hotkeylimit-ipk
+          path: bin/packages/**/*.ipk
