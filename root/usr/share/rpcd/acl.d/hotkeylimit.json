@@ -1,7 +1,0 @@
-{
-	"hotkeylimit": {
-		"description": "Hotkey speed limit",
-		"read": { "ubus": { "hotkeylimit": ["devices", "status"] } },
-		"write": { "ubus": { "hotkeylimit": ["set"] } }
-	}
-}

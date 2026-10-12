@@ -2,17 +2,21 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-hotkeylimit
 PKG_VERSION:=1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 include $(INCLUDE_DIR)/package.mk
 
 define Package/$(PKG_NAME)
-  SECTION:=luci
-  CATEGORY:=LuCI
-  SUBMENU:=3. Applications
-  TITLE:=Hotkey per-device speed limit (lightweight web page)
-  DEPENDS:=+rpcd +uhttpd-mod-ubus +nftables-json
-  PKGARCH:=all
+	SECTION:=luci
+	CATEGORY:=LuCI
+	SUBMENU:=3. Applications
+	TITLE:=Hotkey per-device speed limit (standalone lightweight web page)
+	DEPENDS:=+uhttpd +nftables-json
+	PKGARCH:=all
+endef
+
+define Package/$(PKG_NAME)/conffiles
+/etc/config/hotkeylimit
 endef
 
 define Build/Prepare
@@ -23,15 +27,23 @@ define Build/Compile
 endef
 
 define Package/$(PKG_NAME)/install
-	$(INSTALL_DIR) $(1)/www/hotkey-limit $(1)/usr/libexec/rpcd $(1)/usr/share/rpcd/acl.d
-	$(INSTALL_DATA) $(CURDIR)/root/www/hotkey-limit/index.html $(1)/www/hotkey-limit/
-	$(INSTALL_BIN) $(CURDIR)/root/usr/libexec/rpcd/hotkeylimit $(1)/usr/libexec/rpcd/
-	$(INSTALL_DATA) $(CURDIR)/root/usr/share/rpcd/acl.d/hotkeylimit.json $(1)/usr/share/rpcd/acl.d/
+	$(INSTALL_DIR) $(1)/usr/share/hotkeylimit/www/cgi-bin $(1)/etc/init.d $(1)/etc/config
+	$(INSTALL_DATA) $(CURDIR)/root/usr/share/hotkeylimit/www/index.html $(1)/usr/share/hotkeylimit/www/
+	$(INSTALL_BIN) $(CURDIR)/root/usr/share/hotkeylimit/www/cgi-bin/api $(1)/usr/share/hotkeylimit/www/cgi-bin/
+	$(INSTALL_BIN) $(CURDIR)/root/etc/init.d/hotkeylimit $(1)/etc/init.d/
+	$(INSTALL_CONF) $(CURDIR)/root/etc/config/hotkeylimit $(1)/etc/config/
 endef
 
 define Package/$(PKG_NAME)/postinst
 #!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd restart
+[ -n "$${IPKG_INSTROOT}" ] || { /etc/init.d/hotkeylimit enable; /etc/init.d/hotkeylimit restart; }
+exit 0
+endef
+
+define Package/$(PKG_NAME)/prerm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || { /etc/init.d/hotkeylimit stop; /etc/init.d/hotkeylimit disable; nft delete table inet hklimit 2>/dev/null; }
+exit 0
 endef
 
 $(eval $(call BuildPackage,$(PKG_NAME)))

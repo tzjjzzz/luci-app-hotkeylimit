@@ -42,6 +42,7 @@ jobs:
         run: |
           rm -rf package/${PACKAGE_NAME}; mkdir -p package/${PACKAGE_NAME}
           rsync -a --exclude .git --exclude .github "${{ github.workspace }}"/ package/${PACKAGE_NAME}/
+          find bin/packages -name "${PACKAGE_NAME}*.apk" -delete 2>/dev/null || true
           echo "CONFIG_PACKAGE_${PACKAGE_NAME}=m" > .config
           make defconfig
           set -o pipefail
