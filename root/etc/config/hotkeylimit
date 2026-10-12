@@ -1,3 +1,5 @@
 config hotkeylimit 'main'
 	option enabled '1'
 	option port '8899'
+	# seconds without heartbeat before all limits are removed automatically
+	option timeout '20'

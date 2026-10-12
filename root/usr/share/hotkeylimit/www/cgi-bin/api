@@ -1,44 +1,37 @@
 #!/bin/sh
-# hotkeylimit CGI. value: -1 = block, 0 = no limit, N>0 = limit to N KB/s
 . /usr/share/libubox/jshn.sh
+. /usr/share/hotkeylimit/lib.sh
 
-ST=/tmp/hklimit.state
-TB="inet hklimit"
-CH=hkchain
-ERR=""
-
-run() { out=$("$@" 2>&1) || ERR="${ERR}${out} "; }
-
-init_nft() {
-	nft list chain $TB $CH >/dev/null 2>&1 && return 0
-	nft add table $TB 2>/dev/null
-	out=$(nft add chain $TB $CH '{ type filter hook forward priority -5; policy accept; }' 2>&1) || { ERR="$out"; return 1; }
-}
-
-del_rules() {
-	nft -a list chain $TB $CH 2>/dev/null | grep "\"hk_$1\"" | sed 's/.*# handle //' |
-		while read -r h; do nft delete rule $TB $CH handle "$h"; done
-	[ -f $ST ] && { grep -v "^$1 " $ST >$ST.t; mv $ST.t $ST; }
-}
-
-# $1 ip  $2 saddr|daddr  $3 value
-add_rule() {
-	case "$3" in
-	0) return ;;
-	-1) run nft add rule $TB $CH ip "$2" "$1" counter drop comment '"hk_'"$1"'"' ;;
-	*) run nft add rule $TB $CH ip "$2" "$1" limit rate over "$3" kbytes/second burst "$3" kbytes counter drop comment '"hk_'"$1"'"' ;;
-	esac
-}
-
+hdr() { printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'; }
 jerr() { json_init; json_add_string error "$1"; json_dump; }
-
-printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+body() { head -c "${CONTENT_LENGTH:-0}"; }
+need_post() {
+	[ "$REQUEST_METHOD" = POST ] || return 1
+	case "$CONTENT_TYPE" in application/json*) return 0 ;; esac
+	return 1
+}
+valid_val() {
+	[ "$1" = -1 ] && return 0
+	case "$1" in "" | *[!0-9]*) return 1 ;; esac
+	return 0
+}
+out_state() {
+	local ip="" up=-1 down=0
+	[ -f "$CFG" ] && read -r ip up down <"$CFG"
+	json_init
+	json_add_string ip "$ip"
+	json_add_int up "$up"
+	json_add_int down "$down"
+	if [ -f "$ONF" ]; then json_add_boolean on 1; else json_add_boolean on 0; fi
+	json_dump
+}
 
 op=${QUERY_STRING#op=}
 op=${op%%&*}
 
 case "$op" in
 devices)
+	hdr
 	json_init
 	json_add_array devices
 	[ -f /tmp/dhcp.leases ] && while read -r e mac ip host id; do
@@ -51,51 +44,49 @@ devices)
 	json_close_array
 	json_dump
 	;;
-status)
-	json_init
-	json_add_array active
-	[ -f $ST ] && while read -r ip up down; do
-		[ -n "$ip" ] || continue
-		json_add_object ""
-		json_add_string ip "$ip"
-		json_add_int up "$up"
-		json_add_int down "$down"
-		json_close_object
-	done <$ST
-	json_close_array
-	json_dump
+beat) # heartbeat + current state
+	hdr
+	[ -f "$ONF" ] && now >"$BEAT"
+	out_state
 	;;
-set)
-	[ "$REQUEST_METHOD" = POST ] || { jerr "POST only"; exit 0; }
-	case "$CONTENT_TYPE" in application/json*) ;; *) jerr "bad content type"; exit 0 ;; esac
-	input=$(head -c "${CONTENT_LENGTH:-0}")
-	json_load "$input"
+cfg)
+	hdr
+	need_post || { jerr "bad request"; exit 0; }
+	json_load "$(body)"
 	json_get_var ip ip
 	json_get_var up up
 	json_get_var down down
-	json_get_var on on
-	up=${up:--1}
-	down=${down:-0}
 	case "$ip" in *[!0-9.]* | "") jerr "bad ip"; exit 0 ;; esac
-	for v in "$up" "$down"; do
-		[ "$v" = -1 ] && continue
-		case "$v" in "" | *[!0-9]*) jerr "bad value"; exit 0 ;; esac
-	done
-	init_nft || { jerr "nft: $ERR"; exit 0; }
-	del_rules "$ip"
-	if [ "$on" = 1 ] || [ "$on" = true ]; then
-		add_rule "$ip" saddr "$up"
-		add_rule "$ip" daddr "$down"
-		if [ -n "$ERR" ]; then
-			del_rules "$ip"
-			jerr "nft: $ERR"
-			exit 0
-		fi
-		echo "$ip $up $down" >>$ST
+	valid_val "$up" && valid_val "$down" || { jerr "bad value"; exit 0; }
+	echo "$ip $up $down" >"$CFG"
+	if [ -f "$ONF" ]; then
+		apply || { clear_all; jerr "nft: $ERR"; exit 0; }
 	fi
-	echo '{"ok":true}'
+	out_state
+	;;
+toggle)
+	hdr
+	need_post || { jerr "bad request"; exit 0; }
+	if [ -f "$ONF" ]; then
+		clear_all
+	else
+		[ -s "$CFG" ] || { jerr "no device selected"; exit 0; }
+		apply || { clear_all; jerr "nft: $ERR"; exit 0; }
+		now >"$BEAT"
+		: >"$ONF"
+	fi
+	out_state
+	;;
+ps1)
+	k=${QUERY_STRING#*key=}
+	k=${k%%&*}
+	case "$k" in "" | *[!A-Za-z0-9]*) k=F8 ;; esac
+	h=$(printf '%s' "$HTTP_HOST" | tr -cd 'A-Za-z0-9.:_-')
+	printf 'Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="hotkey.ps1"\r\nCache-Control: no-store\r\n\r\n'
+	sed -e "s|__HOST__|$h|" -e "s|__KEY__|$k|" /usr/share/hotkeylimit/hotkey.ps1.tpl
 	;;
 *)
+	hdr
 	jerr "unknown op"
 	;;
 esac
