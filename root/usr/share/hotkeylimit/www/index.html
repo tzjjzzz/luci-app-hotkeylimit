@@ -32,7 +32,7 @@ function later(){clearTimeout(tm);tm=setTimeout(sendCfg,300)}
 function toggle(){clearTimeout(tm);save();var c=vals();
 if(c)api('cfg',c,function(r){if(r.error)return render(r);api('toggle',{},render)});else api('toggle',{},render)}
 function pick(ip){var d=$('d');if(!ip)return;d.value=ip;if(d.value!=ip){d.add(new Option(ip,ip));d.value=ip}}
-function ps(){var k=S.hk;if(!/^(F([1-9]|1[0-9]|2[0-4])|[A-Za-z])$/.test(k))k='F8';$('ps').href='/cgi-bin/api?op=ps1&key='+k}
+function ps(){var k=S.hk;if(!/^(F([1-9]|1[0-9]|2[0-4])|[A-Za-z0-9]|Pause|ScrollLock|Insert|Home|End|PageUp|PageDown)$/.test(k))k='F8';$('ps').href='/cgi-bin/api?op=ps1&key='+k}
 function init(){$('up').value=S.up;$('dn').value=S.dn;$('hk').textContent=S.hk;ps();
 api('devices',0,function(r){var d=$('d');d.innerHTML='';
 (r.devices||[]).forEach(function(x){d.add(new Option(x.name+' '+x.ip,x.ip))});

@@ -41,10 +41,34 @@ $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $script:tray.ContextMenuStrip = $menu
 $script:tray.Visible = $true
 
-$vk = [uint32]([System.Windows.Forms.Keys]$Key)
-$script:hk = New-Object HotkeyWindow $vk
+function Get-VK([string]$k) {
+    $k = $k.Trim().ToUpper()
+    if ($k -match '^F(\d{1,2})$') {
+        $n = [int]$Matches[1]
+        if ($n -ge 1 -and $n -le 24) { return [uint32](0x6F + $n) }
+        return $null
+    }
+    if ($k -match '^[A-Z0-9]$') { return [uint32][char]$k }
+    switch ($k) {
+        'PAUSE'      { return [uint32]0x13 }
+        'SCROLLLOCK' { return [uint32]0x91 }
+        'INSERT'     { return [uint32]0x2D }
+        'HOME'       { return [uint32]0x24 }
+        'END'        { return [uint32]0x23 }
+        'PAGEUP'     { return [uint32]0x21 }
+        'PAGEDOWN'   { return [uint32]0x22 }
+    }
+    return $null
+}
+$vk = Get-VK $Key
+if ($null -eq $vk) {
+    [void][System.Windows.Forms.MessageBox]::Show("Unsupported key '$Key'. Use F1-F24, A-Z, 0-9, Pause, ScrollLock, Insert, Home, End, PageUp or PageDown.")
+    $script:tray.Dispose()
+    exit 1
+}
+$script:hk = New-Object HotkeyWindow -ArgumentList ([uint32]$vk)
 if (-not $script:hk.Ok) {
-    [void][System.Windows.Forms.MessageBox]::Show("Cannot register hotkey $Key (already in use?)")
+    [void][System.Windows.Forms.MessageBox]::Show("Cannot register hotkey $Key (already in use by another program?)")
     $script:tray.Dispose()
     exit 1
 }
