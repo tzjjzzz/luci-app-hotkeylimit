@@ -11,8 +11,8 @@ input,select,button{font:inherit;width:100%;box-sizing:border-box;margin:3px 0;p
 <button onclick=login()>登录</button></div>
 <div id=m hidden>
 <select id=d></select>
-上传限速 KB/s (0=禁止)<input id=up type=number min=0 value=0>
-下载限速 KB/s (0=禁止)<input id=dn type=number min=0 value=0>
+上传 KB/s (-1=禁止, 0=不限)<input id=up type=number min=-1 value=-1>
+下载 KB/s (-1=禁止, 0=不限)<input id=dn type=number min=-1 value=0>
 热键：<button id=hk onclick=capture()></button>
 <div id=s>未限制</div>
 <button onclick=toggle()>切换</button>
@@ -27,14 +27,16 @@ if(!r||r[0]){if(r&&r[0]==6){sessionStorage.removeItem('sid');sid=0;init()}return
 x.send(JSON.stringify({jsonrpc:'2.0',id:1,method:'call',params:[sid||N,o,m,a]}))}
 function login(){sid=0;rpc('session','login',{username:$('u').value,password:$('p').value},function(r){
 sid=sessionStorage.sid=r.ubus_rpc_session;init()})}
+function v(n){return n<0?'禁止':n?n+'KB/s':'不限'}
 function show(){var a=on[$('d').value];$('s').className=a?'on':'';
-$('s').textContent=a?'限制中 ↑'+a.up+' ↓'+a.down+' KB/s':'未限制'}
+$('s').textContent=a?'限制中 ↑'+v(a.up)+' ↓'+v(a.down):'未限制'}
 function status(){rpc('hotkeylimit','status',{},function(r){on={};(r.active||[]).forEach(function(a){on[a.ip]=a});show()})}
 function init(){$('lg').hidden=!!sid;$('m').hidden=!sid;if(!sid)return;$('hk').textContent=key;
 rpc('hotkeylimit','devices',{},function(r){$('d').innerHTML='';(r.devices||[]).forEach(function(v){
 var o=new Option(v.name+' '+v.ip,v.ip);$('d').add(o)});status()})}
 function toggle(){var ip=$('d').value;if(!ip)return;var a=!on[ip];
-rpc('hotkeylimit','set',{ip:ip,up:+$('up').value||0,down:+$('dn').value||0,on:a},status)}
+var u=parseInt($('up').value),w=parseInt($('dn').value);
+rpc('hotkeylimit','set',{ip:ip,up:isNaN(u)?-1:u,down:isNaN(w)?0:w,on:a},function(r){if(r&&r.error)alert(r.error);status()})}
 function capture(){cap=1;$('hk').textContent='请按键…'}
 $('d').onchange=show;
 document.onkeydown=function(e){if(cap){key=localStorage.hk=e.key;cap=0;$('hk').textContent=key;e.preventDefault();return}

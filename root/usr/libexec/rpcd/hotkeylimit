@@ -1,30 +1,37 @@
 #!/bin/sh
 # rpcd backend: hotkeylimit
+# value: -1 = block, 0 = no limit, N>0 = limit to N KB/s
 . /usr/share/libubox/jshn.sh
 
 ST=/tmp/hklimit.state
 TB="inet hklimit"
+CH=hkchain
+ERR=""
+
+run() { out=$("$@" 2>&1) || ERR="${ERR}${out} "; }
 
 init_nft() {
-	nft list table $TB >/dev/null 2>&1 && return
-	nft add table $TB
-	nft add chain $TB fwd '{ type filter hook forward priority -5; policy accept; }'
+	nft list chain $TB $CH >/dev/null 2>&1 && return 0
+	nft add table $TB 2>/dev/null
+	out=$(nft add chain $TB $CH '{ type filter hook forward priority -5; policy accept; }' 2>&1) || { ERR="$out"; return 1; }
 }
 
 del_rules() {
-	nft -a list chain $TB fwd 2>/dev/null | grep "\"hk_$1\"" | sed 's/.*# handle //' |
-		while read -r h; do nft delete rule $TB fwd handle "$h"; done
+	nft -a list chain $TB $CH 2>/dev/null | grep "\"hk_$1\"" | sed 's/.*# handle //' |
+		while read -r h; do nft delete rule $TB $CH handle "$h"; done
 	[ -f $ST ] && { grep -v "^$1 " $ST >$ST.t; mv $ST.t $ST; }
 }
 
-# $1 ip  $2 dir(saddr|daddr)  $3 value (0=block, N=KB/s)
+# $1 ip  $2 saddr|daddr  $3 value
 add_rule() {
-	if [ "$3" = 0 ]; then
-		nft add rule $TB fwd ip "$2" "$1" counter drop comment '"hk_'"$1"'"'
-	else
-		nft add rule $TB fwd ip "$2" "$1" limit rate over "$3" kbytes/second burst "$3" kbytes drop comment '"hk_'"$1"'"'
-	fi
+	case "$3" in
+	0) return ;;
+	-1) run nft add rule $TB $CH ip "$2" "$1" counter drop comment '"hk_'"$1"'"' ;;
+	*) run nft add rule $TB $CH ip "$2" "$1" limit rate over "$3" kbytes/second burst "$3" kbytes counter drop comment '"hk_'"$1"'"' ;;
+	esac
 }
+
+jerr() { json_init; json_add_string error "$1"; json_dump; }
 
 case "$1" in
 list)
@@ -66,14 +73,23 @@ call)
 		json_get_var up up
 		json_get_var down down
 		json_get_var on on
-		case "$ip" in *[!0-9.]* | "") echo '{"error":"bad ip"}'; exit 0 ;; esac
-		case "$up$down" in *[!0-9]*) echo '{"error":"bad value"}'; exit 0 ;; esac
-		init_nft
+		up=${up:--1}
+		down=${down:-0}
+		case "$ip" in *[!0-9.]* | "") jerr "bad ip"; exit 0 ;; esac
+		for v in "$up" "$down"; do
+			case "$v" in -1 | [0-9] | [0-9][0-9]* ) ;; *) jerr "bad value"; exit 0 ;; esac
+		done
+		init_nft || { jerr "nft: $ERR"; exit 0; }
 		del_rules "$ip"
 		if [ "$on" = 1 ] || [ "$on" = true ]; then
-			[ -n "$up" ] && add_rule "$ip" saddr "$up"
-			[ -n "$down" ] && add_rule "$ip" daddr "$down"
-			echo "$ip ${up:--1} ${down:--1}" >>$ST
+			add_rule "$ip" saddr "$up"
+			add_rule "$ip" daddr "$down"
+			if [ -n "$ERR" ]; then
+				del_rules "$ip"
+				jerr "nft: $ERR"
+				exit 0
+			fi
+			echo "$ip $up $down" >>$ST
 		fi
 		echo '{"ok":true}'
 		;;
