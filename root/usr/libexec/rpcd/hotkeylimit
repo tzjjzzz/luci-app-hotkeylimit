@@ -1,0 +1,82 @@
+#!/bin/sh
+# rpcd backend: hotkeylimit
+. /usr/share/libubox/jshn.sh
+
+ST=/tmp/hklimit.state
+TB="inet hklimit"
+
+init_nft() {
+	nft list table $TB >/dev/null 2>&1 && return
+	nft add table $TB
+	nft add chain $TB fwd '{ type filter hook forward priority -5; policy accept; }'
+}
+
+del_rules() {
+	nft -a list chain $TB fwd 2>/dev/null | grep "\"hk_$1\"" | sed 's/.*# handle //' |
+		while read -r h; do nft delete rule $TB fwd handle "$h"; done
+	[ -f $ST ] && { grep -v "^$1 " $ST >$ST.t; mv $ST.t $ST; }
+}
+
+# $1 ip  $2 dir(saddr|daddr)  $3 value (0=block, N=KB/s)
+add_rule() {
+	if [ "$3" = 0 ]; then
+		nft add rule $TB fwd ip "$2" "$1" counter drop comment '"hk_'"$1"'"'
+	else
+		nft add rule $TB fwd ip "$2" "$1" limit rate over "$3" kbytes/second burst "$3" kbytes drop comment '"hk_'"$1"'"'
+	fi
+}
+
+case "$1" in
+list)
+	echo '{"devices":{},"status":{},"set":{"ip":"str","up":0,"down":0,"on":true}}'
+	;;
+call)
+	case "$2" in
+	devices)
+		json_init
+		json_add_array devices
+		[ -f /tmp/dhcp.leases ] && while read -r e mac ip host id; do
+			json_add_object ""
+			json_add_string ip "$ip"
+			json_add_string mac "$mac"
+			json_add_string name "${host:-$mac}"
+			json_close_object
+		done </tmp/dhcp.leases
+		json_close_array
+		json_dump
+		;;
+	status)
+		json_init
+		json_add_array active
+		[ -f $ST ] && while read -r ip up down; do
+			[ -n "$ip" ] || continue
+			json_add_object ""
+			json_add_string ip "$ip"
+			json_add_int up "$up"
+			json_add_int down "$down"
+			json_close_object
+		done <$ST
+		json_close_array
+		json_dump
+		;;
+	set)
+		read -r input
+		json_load "$input"
+		json_get_var ip ip
+		json_get_var up up
+		json_get_var down down
+		json_get_var on on
+		case "$ip" in *[!0-9.]* | "") echo '{"error":"bad ip"}'; exit 0 ;; esac
+		case "$up$down" in *[!0-9]*) echo '{"error":"bad value"}'; exit 0 ;; esac
+		init_nft
+		del_rules "$ip"
+		if [ "$on" = 1 ] || [ "$on" = true ]; then
+			[ -n "$up" ] && add_rule "$ip" saddr "$up"
+			[ -n "$down" ] && add_rule "$ip" daddr "$down"
+			echo "$ip ${up:--1} ${down:--1}" >>$ST
+		fi
+		echo '{"ok":true}'
+		;;
+	esac
+	;;
+esac
