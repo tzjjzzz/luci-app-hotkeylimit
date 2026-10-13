@@ -9,6 +9,9 @@ env:
   OPENWRT_VERSION: 'v25.12.0-rc1'
 permissions:
   contents: write
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
 jobs:
   build-apk:
     runs-on: ubuntu-latest

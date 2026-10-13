@@ -4,6 +4,19 @@
 # It uses a low-level keyboard hook, so it still works when another program already uses the same hotkey.
 # Run hidden at logon (Win+R -> shell:startup -> new shortcut with this target):
 #   powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\path\hotkey.ps1"
+param([switch]$Child)
+# Relaunch once in a hidden window so no console window / taskbar button is ever shown (tray icon only).
+if (-not $Child) {
+    Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-Child')
+    exit
+}
+# Only one instance at a time (two instances would toggle twice and cancel each other out).
+$script:once = New-Object System.Threading.Mutex($false, 'Local\HotkeyLimitPS')
+if (-not $script:once.WaitOne(0)) { exit }
+# Fallback: also hide the console window if it exists (e.g. started with -Child by hand).
+Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'
+[void][Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0)
+
 $script:Router = 'http://__HOST__'
 # $false = the key still reaches other programs too (both react).  $true = this script swallows the key (exclusive).
 $script:Swallow = $false
