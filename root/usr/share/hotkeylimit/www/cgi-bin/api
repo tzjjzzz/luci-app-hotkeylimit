@@ -15,14 +15,23 @@ valid_val() {
 	case "$1" in "" | *[!0-9]*) return 1 ;; esac
 	return 0
 }
+valid_ip() { case "$1" in "" | *[!0-9.]*) return 1 ;; esac; return 0; }
+
 out_state() {
-	local ip="" up=-1 down=0
-	[ -f "$CFG" ] && read -r ip up down <"$CFG"
+	local ip up down key
 	json_init
-	json_add_string ip "$ip"
-	json_add_int up "$up"
-	json_add_int down "$down"
-	if [ -f "$ONF" ]; then json_add_boolean on 1; else json_add_boolean on 0; fi
+	json_add_array list
+	[ -f "$CFG" ] && while read -r ip up down key; do
+		[ -n "$ip" ] || continue
+		json_add_object ""
+		json_add_string ip "$ip"
+		json_add_int up "$up"
+		json_add_int down "$down"
+		json_add_string key "$key"
+		if is_on "$ip"; then json_add_boolean on 1; else json_add_boolean on 0; fi
+		json_close_object
+	done <"$CFG"
+	json_close_array
 	json_dump
 }
 
@@ -44,46 +53,73 @@ devices)
 	json_close_array
 	json_dump
 	;;
-beat) # heartbeat + current state
+list) # state only, does not count as heartbeat
 	hdr
-	[ -f "$ONF" ] && now >"$BEAT"
 	out_state
 	;;
-cfg)
+beat) # heartbeat + state
+	hdr
+	[ -s "$ONF" ] && now >"$BEAT"
+	out_state
+	;;
+cfg) # add or update one device
 	hdr
 	need_post || { jerr "bad request"; exit 0; }
 	json_load "$(body)"
 	json_get_var ip ip
 	json_get_var up up
 	json_get_var down down
-	case "$ip" in *[!0-9.]* | "") jerr "bad ip"; exit 0 ;; esac
+	json_get_var key key
+	key=${key:--}
+	valid_ip "$ip" || { jerr "bad ip"; exit 0; }
 	valid_val "$up" && valid_val "$down" || { jerr "bad value"; exit 0; }
-	echo "$ip $up $down" >"$CFG"
-	if [ -f "$ONF" ]; then
-		apply || { clear_all; jerr "nft: $ERR"; exit 0; }
+	case "$key" in "" | *[!A-Za-z0-9-]*) jerr "bad key"; exit 0 ;; esac
+	{ awk -v ip="$ip" '$1!=ip' "$CFG" 2>/dev/null; echo "$ip $up $down $key"; } >"$CFG.t"
+	mv "$CFG.t" "$CFG"
+	if is_on "$ip"; then
+		apply || { set_off "$ip"; apply; jerr "nft: $ERR"; exit 0; }
 	fi
+	out_state
+	;;
+del)
+	hdr
+	need_post || { jerr "bad request"; exit 0; }
+	json_load "$(body)"
+	json_get_var ip ip
+	valid_ip "$ip" || { jerr "bad ip"; exit 0; }
+	awk -v ip="$ip" '$1!=ip' "$CFG" >"$CFG.t" 2>/dev/null
+	mv "$CFG.t" "$CFG"
+	set_off "$ip"
+	apply
 	out_state
 	;;
 toggle)
 	hdr
 	need_post || { jerr "bad request"; exit 0; }
-	if [ -f "$ONF" ]; then
-		clear_all
+	json_load "$(body)"
+	json_get_var ip ip
+	valid_ip "$ip" || { jerr "bad ip"; exit 0; }
+	has_cfg "$ip" || { jerr "device not configured"; exit 0; }
+	if is_on "$ip"; then
+		set_off "$ip"
+		apply
 	else
-		[ -s "$CFG" ] || { jerr "no device selected"; exit 0; }
-		apply || { clear_all; jerr "nft: $ERR"; exit 0; }
+		set_on "$ip"
 		now >"$BEAT"
-		: >"$ONF"
+		apply || { set_off "$ip"; apply; jerr "nft: $ERR"; exit 0; }
 	fi
 	out_state
 	;;
+alloff)
+	hdr
+	need_post || { jerr "bad request"; exit 0; }
+	clear_all
+	out_state
+	;;
 ps1)
-	k=${QUERY_STRING#*key=}
-	k=${k%%&*}
-	case "$k" in "" | *[!A-Za-z0-9]*) k=F8 ;; esac
 	h=$(printf '%s' "$HTTP_HOST" | tr -cd 'A-Za-z0-9.:_-')
 	printf 'Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="hotkey.ps1"\r\nCache-Control: no-store\r\n\r\n'
-	sed -e "s|__HOST__|$h|" -e "s|__KEY__|$k|" /usr/share/hotkeylimit/hotkey.ps1.tpl
+	sed -e "s|__HOST__|$h|" /usr/share/hotkeylimit/hotkey.ps1.tpl
 	;;
 *)
 	hdr

@@ -2,52 +2,68 @@
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>热键限速</title>
-<style>body{font:15px sans-serif;max-width:420px;margin:1em auto;padding:0 1em}
-input,select,button{font:inherit;width:100%;box-sizing:border-box;margin:3px 0;padding:6px}
-#s{font-size:1.4em;text-align:center;padding:.5em;border-radius:6px;background:#8c8;margin:.5em 0}
-#s.on{background:#e77}</style>
-<select id=d></select>
-上传 KB/s (-1=禁止, 0=不限)<input id=up type=number min=-1 value=-1>
-下载 KB/s (-1=禁止, 0=不限)<input id=dn type=number min=-1 value=0>
-热键：<button id=hk onclick=capture()></button>
-<div id=s>未限制</div>
-<button onclick=toggle()>切换</button>
-<small>开启后修改数值即时生效。关闭本页或断线后，限制会在约 20 秒内自动取消。<br>
-<a id=ps href="/cgi-bin/api?op=ps1&key=F8">下载 Windows 全局热键脚本</a></small>
+<style>body{font:15px sans-serif;max-width:460px;margin:1em auto;padding:0 1em}
+input,select,button{font:inherit;box-sizing:border-box;margin:3px 0;padding:6px}
+input,select{width:100%}button{cursor:pointer}
+.r{border:1px solid #999;border-radius:6px;padding:8px;margin:8px 0}
+.r.on{background:#fcc}
+.g{display:flex;gap:6px}.g button{flex:1}
+.h{display:flex;justify-content:space-between;align-items:center}
+.h button{padding:2px 10px}label{display:block}</style>
+<div id=list></div>
+<select id=add></select>
+<div class=g><button onclick=addDev()>添加设备</button><button onclick=addIp()>手动输入 IP</button><button onclick=allOff()>全部取消</button></div>
+<small>每台设备有自己的限速值和热键，可同时限制多台。开启后修改数值即时生效。关闭本页或断线后，限制会在约 20 秒内自动取消。<br>
+<a href="/cgi-bin/api?op=ps1">下载 Windows 全局热键脚本</a>（热键以本页设置为准）</small>
 <script>
-var $=function(i){return document.getElementById(i)},on=0,cap=0,tm,S={dev:'',up:-1,dn:0,hk:'F8'};
-try{S=Object.assign(S,JSON.parse(localStorage.hl))}catch(e){}
-function save(){S.dev=$('d').value;S.up=$('up').value;S.dn=$('dn').value;try{localStorage.hl=JSON.stringify(S)}catch(e){}}
+var $=function(i){return document.getElementById(i)},R={},D=[],names={},tms={},cap='',L=[];
+try{L=JSON.parse(localStorage.hl)||[]}catch(e){}
+function backup(l){try{localStorage.hl=JSON.stringify(l.map(function(x){return{ip:x.ip,up:x.up,down:x.down,key:x.key}}))}catch(e){}}
 function api(op,body,cb){var x=new XMLHttpRequest();x.open(body?'POST':'GET','/cgi-bin/api?op='+op);
 if(body)x.setRequestHeader('Content-Type','application/json');
 x.onload=function(){var r;try{r=JSON.parse(x.responseText)}catch(e){return}cb(r)};
-x.onerror=function(){$('s').className='';$('s').textContent='连接断开'};x.send(body?JSON.stringify(body):null)}
+x.onerror=function(){document.title='连接断开'};x.send(body?JSON.stringify(body):null)}
 function v(n){return n<0?'禁止':n?n+'KB/s':'不限'}
-function render(r){if(r.error){alert(r.error);return}on=r.on;
-$('s').className=on?'on':'';$('s').textContent=on?'限制中 ↑'+v(r.up)+' ↓'+v(r.down):'未限制'}
-function vals(){var u=parseInt($('up').value),w=parseInt($('dn').value),ip=$('d').value;
-return ip&&u>=-1&&w>=-1?{ip:ip,up:u,down:w}:0}
-function sendCfg(){save();var c=vals();if(c)api('cfg',c,render)}
-function later(){clearTimeout(tm);tm=setTimeout(sendCfg,300)}
-function toggle(){clearTimeout(tm);save();var c=vals();
-if(c)api('cfg',c,function(r){if(r.error)return render(r);api('toggle',{},render)});else api('toggle',{},render)}
-function pick(ip){var d=$('d');if(!ip)return;d.value=ip;if(d.value!=ip){d.add(new Option(ip,ip));d.value=ip}}
-function ps(){var k=S.hk;if(!/^(F([1-9]|1[0-9]|2[0-4])|[A-Za-z0-9]|Pause|ScrollLock|Insert|Home|End|PageUp|PageDown)$/.test(k))k='F8';$('ps').href='/cgi-bin/api?op=ps1&key='+k}
-function init(){$('up').value=S.up;$('dn').value=S.dn;$('hk').textContent=S.hk;ps();
-api('devices',0,function(r){var d=$('d');d.innerHTML='';
-(r.devices||[]).forEach(function(x){d.add(new Option(x.name+' '+x.ip,x.ip))});
-api('beat',0,function(s){
-if(s.ip){$('up').value=s.up;$('dn').value=s.down;pick(s.ip);save()}
-else{pick(S.dev);sendCfg()}
-render(s)})})}
-function capture(){cap=1;$('hk').textContent='请按键…'}
+function mk(ip){var d=document.createElement('div');d.className='r';
+d.innerHTML='<div class=h><b></b><button class=x>×</button></div><label>上传 KB/s (-1=禁止, 0=不限)<input class=u type=number min=-1></label><label>下载 KB/s (-1=禁止, 0=不限)<input class=w type=number min=-1></label><div class=g><button class=k></button><button class=o></button></div>';
+var q=function(c){return d.querySelector('.'+c)},e={d:d,b:d.querySelector('b'),u:q('u'),w:q('w'),k:q('k'),o:q('o'),key:'-'};
+e.u.oninput=e.w.oninput=function(){later(ip)};
+e.k.onclick=function(){cap=ip;e.k.textContent='请按键…(Esc=清除)'};
+e.o.onclick=function(){toggle(ip)};
+q('x').onclick=function(){api('del',{ip:ip},render)};
+$('list').appendChild(d);R[ip]=e;return e}
+function render(r){if(r.error){alert(r.error);return}document.title='热键限速';
+var l=r.list||[],seen={};
+l.forEach(function(x){seen[x.ip]=1;var e=R[x.ip]||mk(x.ip);
+e.d.className='r'+(x.on?' on':'');e.key=x.key;e.b.textContent=(names[x.ip]||'')+' '+x.ip;
+e.k.textContent='热键：'+(x.key=='-'?'无':x.key);
+e.o.textContent=x.on?'已限制 ↑'+v(x.up)+' ↓'+v(x.down)+'（点击取消）':'未限制（点击开启）';
+if(document.activeElement!=e.u)e.u.value=x.up;if(document.activeElement!=e.w)e.w.value=x.down});
+for(var ip in R)if(!seen[ip]){R[ip].d.remove();delete R[ip]}
+backup(l);fillAdd()}
+function fillAdd(){var s=$('add');s.innerHTML='';D.forEach(function(x){if(!R[x.ip])s.add(new Option(x.name+' '+x.ip,x.ip))})}
+function cfgOf(ip){var e=R[ip];return{ip:ip,up:parseInt(e.u.value),down:parseInt(e.w.value),key:e.key}}
+function ok(c){return c.up>=-1&&c.down>=-1}
+function sendCfg(ip){var c=cfgOf(ip);if(ok(c))api('cfg',c,render)}
+function later(ip){clearTimeout(tms[ip]);tms[ip]=setTimeout(function(){sendCfg(ip)},300)}
+function toggle(ip){clearTimeout(tms[ip]);var c=cfgOf(ip),go=function(){api('toggle',{ip:ip},render)};
+if(ok(c))api('cfg',c,function(r){if(r.error)return render(r);go()});else go()}
+function add(ip){api('cfg',{ip:ip,up:-1,down:0,key:'-'},render)}
+function addDev(){var ip=$('add').value;if(ip)add(ip)}
+function addIp(){var ip=prompt('设备 IP');if(ip&&/^\d+(\.\d+){3}$/.test(ip))add(ip)}
+function allOff(){api('alloff',{},render)}
 function bt(){api('beat',0,render)}
-$('d').onchange=function(){sendCfg();this.blur()};
-$('up').oninput=$('dn').oninput=later;
-$('up').onchange=$('dn').onchange=function(){this.blur()};
+function restore(i){if(i>=L.length)return bt();api('cfg',L[i],function(){restore(i+1)})}
+function init(){api('devices',0,function(r){D=r.devices||[];D.forEach(function(x){names[x.ip]=x.name});
+api('list',0,function(s){if(!(s.list||[]).length&&L.length)restore(0);else render(s)})})}
 document.onvisibilitychange=function(){if(!document.hidden)bt()};
-document.onkeydown=function(e){if(cap){S.hk=e.key;cap=0;$('hk').textContent=e.key;save();ps();e.preventDefault();return}
-if(e.target.tagName=='INPUT')return;if(e.key==S.hk&&!e.repeat){e.preventDefault();toggle()}};
+document.onkeydown=function(e){
+if(cap){var ip=cap;cap='';e.preventDefault();var k=e.key=='Escape'?'-':e.key;
+if(!/^([A-Za-z0-9]+|-)$/.test(k)){alert('不支持该按键');return bt()}
+for(var i in R)if(i!=ip&&k!='-'&&R[i].key==k){alert('该热键已用于 '+i);return bt()}
+R[ip].key=k;return sendCfg(ip)}
+if(e.target.tagName=='INPUT'||e.repeat)return;
+for(var i in R)if(R[i].key!='-'&&R[i].key==e.key){e.preventDefault();toggle(i);break}};
 try{var w=new Worker(URL.createObjectURL(new Blob(['setInterval(function(){postMessage(0)},5000)'])));w.onmessage=bt}catch(e){setInterval(bt,5000)}
 init();
 </script>
