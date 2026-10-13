@@ -13,7 +13,7 @@ input,select{width:100%}button{cursor:pointer}
 <div id=list></div>
 <select id=add></select>
 <div class=g><button onclick=addDev()>添加设备</button><button onclick=addIp()>手动输入 IP</button><button onclick=allOff()>全部取消</button></div>
-<small>每台设备有自己的限速值和热键，可同时限制多台。开启后修改数值即时生效。关闭本页或断线后，限制会在约 20 秒内自动取消。<br>
+<small>限速值所有电脑共用；热键按电脑分别保存（本机的热键只对应本机设置的设备，不同电脑可以用同一个键控制不同设备）。可同时限制多台。开启后修改数值即时生效。关闭本页或断线后，限制会在约 20 秒内自动取消。<br>
 <a href="/cgi-bin/api?op=ps1">下载 Windows 全局热键脚本</a>（热键以本页设置为准）</small>
 <script>
 var $=function(i){return document.getElementById(i)},R={},D=[],names={},tms={},cap='',L=[];
@@ -36,7 +36,7 @@ function render(r){if(r.error){alert(r.error);return}document.title='热键限�
 var l=r.list||[],seen={};
 l.forEach(function(x){seen[x.ip]=1;var e=R[x.ip]||mk(x.ip);
 e.d.className='r'+(x.on?' on':'');e.key=x.key;e.b.textContent=(names[x.ip]||'')+' '+x.ip;
-e.k.textContent='热键：'+(x.key=='-'?'无':x.key);
+e.k.textContent='本机热键：'+(x.key=='-'?'无':x.key);
 e.o.textContent=x.on?'已限制 ↑'+v(x.up)+' ↓'+v(x.down)+'（点击取消）':'未限制（点击开启）';
 if(document.activeElement!=e.u)e.u.value=x.up;if(document.activeElement!=e.w)e.w.value=x.down});
 for(var ip in R)if(!seen[ip]){R[ip].d.remove();delete R[ip]}

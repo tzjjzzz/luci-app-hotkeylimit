@@ -1,7 +1,7 @@
 # Hotkey Limit - global hotkeys for Windows. Uses built-in Windows PowerShell 5.1, nothing to install.
-# Limits (device / upload / download) and each device's hotkey are set on the router web page.
-# This script only listens for those hotkeys and toggles the limit. Changes made on the page are picked up automatically.
-# It uses a low-level keyboard hook, so it still works when another program has already registered the same hotkey.
+# Limits (device / upload / download) and THIS PC's hotkeys are set on the router web page (open it from this PC).
+# This script only listens for those hotkeys and toggles the limit. Page changes are picked up automatically.
+# It uses a low-level keyboard hook, so it still works when another program already uses the same hotkey.
 # Run hidden at logon (Win+R -> shell:startup -> new shortcut with this target):
 #   powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\path\hotkey.ps1"
 $script:Router = 'http://__HOST__'
@@ -9,16 +9,20 @@ $script:Router = 'http://__HOST__'
 $script:Swallow = $false
 $script:alive = $false
 $script:map = @{}
+$script:st = @{}
 $script:sig = ''
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
+Add-Type -AssemblyName System.Net.Http
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+
 public class HotkeyWindow : NativeWindow {
     delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
     [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int id, HookProc cb, IntPtr mod, uint tid);
@@ -72,16 +76,66 @@ public class HotkeyWindow : NativeWindow {
         base.WndProc(ref m);
     }
 }
+
+// small overlay shown instantly; each new message replaces the previous one (no queue, no Windows toast)
+public class Toast : Form {
+    Label lbl = new Label();
+    System.Windows.Forms.Timer tm = new System.Windows.Forms.Timer();
+    public Toast() {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        Opacity = 0.92;
+        lbl.AutoSize = true;
+        lbl.ForeColor = Color.White;
+        lbl.Font = new Font("Segoe UI", 12f);
+        lbl.Padding = new Padding(14, 10, 14, 10);
+        lbl.Location = new Point(0, 0);
+        Controls.Add(lbl);
+        tm.Interval = 1500;
+        tm.Tick += delegate { tm.Stop(); Hide(); };
+    }
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get { CreateParams p = base.CreateParams; p.ExStyle |= 0x08000088; return p; } // NOACTIVATE | TOOLWINDOW | TOPMOST
+    }
+    public void Say(string text, bool bad) {
+        BackColor = bad ? Color.FromArgb(150, 40, 40) : Color.FromArgb(30, 30, 30);
+        lbl.BackColor = BackColor;
+        lbl.Text = text;
+        ClientSize = lbl.GetPreferredSize(Size.Empty);
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Location = new Point(wa.Right - Width - 20, wa.Bottom - Height - 20);
+        if (!Visible) Show();
+        tm.Stop();
+        tm.Start();
+    }
+}
 '@
+
+# one reusable HTTP client: no proxy auto-detection, short timeout (Invoke-RestMethod was the main source of delay)
+$handler = New-Object System.Net.Http.HttpClientHandler
+$handler.UseProxy = $false
+$script:http = New-Object System.Net.Http.HttpClient($handler)
+$script:http.Timeout = [TimeSpan]::FromSeconds(3)
+$script:http.DefaultRequestHeaders.ConnectionClose = $true
 
 function Api([string]$op, [bool]$post, [string]$body = '{}') {
     $u = "$($script:Router)/cgi-bin/api?op=$op"
-    if ($post) { Invoke-RestMethod -Uri $u -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 5 }
-    else { Invoke-RestMethod -Uri $u -TimeoutSec 5 }
+    if ($post) {
+        $c = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
+        $s = $script:http.PostAsync($u, $c).Result.Content.ReadAsStringAsync().Result
+    } else {
+        $s = $script:http.GetStringAsync($u).Result
+    }
+    $s | ConvertFrom-Json
 }
 function V($n) { if ($n -lt 0) { 'blocked' } elseif ($n -eq 0) { 'unlimited' } else { "$n KB/s" } }
-function Notify([string]$msg, [string]$icon = 'Info') {
-    $script:tray.ShowBalloonTip(2000, 'Hotkey Limit', $msg, [System.Windows.Forms.ToolTipIcon]$icon)
+function Notify([string]$msg, [bool]$bad = $false) { $script:toast.Say($msg, $bad) }
+function Update-State($l) {
+    $script:st = @{}
+    foreach ($d in $l) { $script:st[[string]$d.ip] = [bool]$d.on }
 }
 function Get-VK([string]$k) {
     $k = $k.Trim().ToUpper()
@@ -103,7 +157,7 @@ function Get-VK([string]$k) {
     return $null
 }
 
-# (re)register hotkeys whenever the key mapping on the router changes
+# (re)register hotkeys whenever this PC's key mapping on the router changes
 function Sync($list) {
     $want = @($list | Where-Object { $_.key -and $_.key -ne '-' })
     $sig = ($want | ForEach-Object { "$($_.ip)=$($_.key)" }) -join ','
@@ -119,16 +173,17 @@ function Sync($list) {
         $id++
     }
     $script:sig = $sig
-    if ($failed.Count -gt 0) { Notify ("Unsupported hotkey: " + ($failed -join ', ') + " (use F1-F24, A-Z, 0-9, Pause, ScrollLock, Insert, Home, End, PageUp, PageDown)") 'Error' }
+    if ($failed.Count -gt 0) { Notify ("Unsupported hotkey: " + ($failed -join ', ') + " (use F1-F24, A-Z, 0-9, Pause, ScrollLock, Insert, Home, End, PageUp, PageDown)") $true }
 }
 
 $script:tray = New-Object System.Windows.Forms.NotifyIcon
 $script:tray.Icon = [System.Drawing.SystemIcons]::Shield
-$script:tray.Text = 'Hotkey Limit'
+$script:tray.Text = 'Hotkey Limit (right-click: Exit)'
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$menu.Items.Add('Exit', $null, { [System.Windows.Forms.Application]::Exit() })
 $script:tray.ContextMenuStrip = $menu
 $script:tray.Visible = $true
+$script:toast = New-Object Toast
 
 $script:hkw = New-Object HotkeyWindow
 $script:hkw.Swallow = $script:Swallow
@@ -140,16 +195,18 @@ if (-not $script:hkw.HookOk) {
 $script:hkw.add_Pressed({
     $ip = $script:map[[int]$script:hkw.LastId]
     if (-not $ip) { return }
+    # instant feedback from the last known state, corrected below when the router answers
+    if ($script:st[$ip]) { Notify "$ip  OFF ..." } else { Notify "$ip  ON ..." }
     try {
         $r = Api 'toggle' $true "{`"ip`":`"$ip`"}"
-        if ($r.error) { Notify ([string]$r.error) 'Error'; return }
+        if ($r.error) { Notify ([string]$r.error) $true; return }
         $l = @($r.list)
+        Update-State $l
         $script:alive = [bool]($l | Where-Object { $_.on })
         $d = $l | Where-Object { $_.ip -eq $ip } | Select-Object -First 1
-        if ($d.on) { Notify "$ip  limit ON   up: $(V $d.up)   down: $(V $d.down)" }
-        else { Notify "$ip  limit OFF" }
+        if ($d.on) { Notify "$ip  ON   up: $(V $d.up)   down: $(V $d.down)" } else { Notify "$ip  OFF" }
     } catch {
-        Notify 'Cannot reach router' 'Error'
+        Notify 'Cannot reach router' $true
     }
 })
 
@@ -161,12 +218,18 @@ $script:t.add_Tick({
         $op = if ($script:alive) { 'beat' } else { 'list' }
         $r = Api $op $false
         $l = @($r.list)
+        Update-State $l
         if ($script:alive) { $script:alive = [bool]($l | Where-Object { $_.on }) }
         Sync $l
     } catch { }
     $script:t.Interval = if ($script:alive) { 5000 } else { 15000 }
 })
-try { Sync @((Api 'list' $false).list) } catch { }
+try {
+    $r0 = Api 'list' $false
+    Update-State @($r0.list)
+    Sync @($r0.list)
+    Notify 'Hotkey Limit running'
+} catch { Notify 'Router not reachable yet, will keep trying' $true }
 $script:t.Start()
 
 [System.Windows.Forms.Application]::Run()

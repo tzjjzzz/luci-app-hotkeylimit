@@ -1,14 +1,32 @@
 # shared helpers. value: -1 = block, 0 = no limit, N>0 = limit to N KB/s
-# $CFG lines: "ip up down key"   $ONF lines: ips that are currently limited
+# $CFG  lines: "ip up down"         (shared device limits)
+# $BIND lines: "client key ip"      (hotkey bindings, per client PC)
+# $ONF  lines: ips that are currently limited
 TB="inet hklimit"
 CH=hkchain
 CFG=/tmp/hklimit.cfg
+BIND=/tmp/hklimit.bind
 ONF=/tmp/hklimit.on
 BEAT=/tmp/hklimit.beat
 NFT=/tmp/hklimit.nft
+DIRTY=/tmp/hklimit.dirty
+PCFG=/etc/hotkeylimit.cfg
+PBIND=/etc/hotkeylimit.bind
 ERR=""
+CID=""
 
 now() { local u; read -r u _ </proc/uptime; echo "${u%.*}"; }
+
+# client identity = MAC of the requesting PC (falls back to its IP)
+client_id() {
+	local m
+	m=$(awk -v ip="$REMOTE_ADDR" '$1==ip{print $4; exit}' /proc/net/arp 2>/dev/null)
+	case "$m" in "" | 00:00:00:00:00:00) m="$REMOTE_ADDR" ;; esac
+	printf '%s' "$m" | tr -cd '0-9A-Fa-f:.'
+}
+cid() { [ -n "$CID" ] || CID=$(client_id); }
+key_for() { awk -v c="$CID" -v ip="$1" '$1==c && $3==ip {print $2; exit}' "$BIND" 2>/dev/null; }
+mark_dirty() { : >"$DIRTY"; }
 
 is_on() { grep -qxF "$1" "$ONF" 2>/dev/null; }
 set_on() { is_on "$1" || echo "$1" >>"$ONF"; }
@@ -27,7 +45,7 @@ clear_all() { nft delete table $TB 2>/dev/null; rm -f "$ONF"; }
 
 # rebuild the whole ruleset atomically from $CFG + $ONF; returns 1 and sets ERR on failure
 apply() {
-	local ip up down key out
+	local ip up down rest out
 	ERR=""
 	if [ ! -s "$ONF" ] || [ ! -f "$CFG" ]; then
 		nft delete table $TB 2>/dev/null
@@ -39,7 +57,7 @@ apply() {
 		echo "table $TB {"
 		echo "	chain $CH {"
 		echo "		type filter hook forward priority -5; policy accept;"
-		while read -r ip up down key; do
+		while read -r ip up down rest; do
 			[ -n "$ip" ] && is_on "$ip" || continue
 			rule_line "$ip" saddr "$up"
 			rule_line "$ip" daddr "$down"

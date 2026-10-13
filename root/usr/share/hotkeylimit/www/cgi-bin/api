@@ -17,17 +17,21 @@ valid_val() {
 }
 valid_ip() { case "$1" in "" | *[!0-9.]*) return 1 ;; esac; return 0; }
 
+# "key" is this client's own hotkey for each device
 out_state() {
-	local ip up down key
+	local ip up down rest key
+	cid
 	json_init
+	json_add_string client "$CID"
 	json_add_array list
-	[ -f "$CFG" ] && while read -r ip up down key; do
+	[ -f "$CFG" ] && while read -r ip up down rest; do
 		[ -n "$ip" ] || continue
+		key=$(key_for "$ip")
 		json_add_object ""
 		json_add_string ip "$ip"
 		json_add_int up "$up"
 		json_add_int down "$down"
-		json_add_string key "$key"
+		json_add_string key "${key:--}"
 		if is_on "$ip"; then json_add_boolean on 1; else json_add_boolean on 0; fi
 		json_close_object
 	done <"$CFG"
@@ -62,7 +66,7 @@ beat) # heartbeat + state
 	[ -s "$ONF" ] && now >"$BEAT"
 	out_state
 	;;
-cfg) # add or update one device
+cfg) # add/update a device's limits and THIS client's hotkey for it
 	hdr
 	need_post || { jerr "bad request"; exit 0; }
 	json_load "$(body)"
@@ -74,8 +78,16 @@ cfg) # add or update one device
 	valid_ip "$ip" || { jerr "bad ip"; exit 0; }
 	valid_val "$up" && valid_val "$down" || { jerr "bad value"; exit 0; }
 	case "$key" in "" | *[!A-Za-z0-9-]*) jerr "bad key"; exit 0 ;; esac
-	{ awk -v ip="$ip" '$1!=ip' "$CFG" 2>/dev/null; echo "$ip $up $down $key"; } >"$CFG.t"
+	cid
+	if [ "$key" != - ]; then
+		dup=$(awk -v c="$CID" -v k="$key" -v ip="$ip" '$1==c && $2==k && $3!=ip {print $3; exit}' "$BIND" 2>/dev/null)
+		[ -n "$dup" ] && { jerr "key already used for $dup"; exit 0; }
+	fi
+	{ awk -v ip="$ip" '$1!=ip' "$CFG" 2>/dev/null; echo "$ip $up $down"; } >"$CFG.t"
 	mv "$CFG.t" "$CFG"
+	{ awk -v c="$CID" -v ip="$ip" '!($1==c && $3==ip)' "$BIND" 2>/dev/null; [ "$key" != - ] && echo "$CID $key $ip"; } >"$BIND.t"
+	mv "$BIND.t" "$BIND"
+	mark_dirty
 	if is_on "$ip"; then
 		apply || { set_off "$ip"; apply; jerr "nft: $ERR"; exit 0; }
 	fi
@@ -89,6 +101,9 @@ del)
 	valid_ip "$ip" || { jerr "bad ip"; exit 0; }
 	awk -v ip="$ip" '$1!=ip' "$CFG" >"$CFG.t" 2>/dev/null
 	mv "$CFG.t" "$CFG"
+	awk -v ip="$ip" '$3!=ip' "$BIND" >"$BIND.t" 2>/dev/null
+	mv "$BIND.t" "$BIND"
+	mark_dirty
 	set_off "$ip"
 	apply
 	out_state
