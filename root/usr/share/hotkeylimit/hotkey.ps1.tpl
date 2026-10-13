@@ -205,7 +205,7 @@ $script:hkw.add_Pressed({
     # instant feedback from the last known state, corrected below when the router answers
     if ($script:st[$ip]) { Notify "$ip  OFF ..." } else { Notify "$ip  ON ..." }
     try {
-        $r = Api 'toggle' $true "{`"ip`":`"$ip`"}"
+        $r = Api 'toggle&src=ps' $true "{`"ip`":`"$ip`"}"
         if ($r.error) { Notify ([string]$r.error) $true; return }
         $l = @($r.list)
         Update-State $l
@@ -217,16 +217,16 @@ $script:hkw.add_Pressed({
     }
 })
 
-# poll the router: refresh hotkey mapping; send heartbeats only while a limit started from here is active
+# poll the router: refresh hotkey mapping; send heartbeats while any limit is on (the router only counts them for limits this script turned on)
 $script:t = New-Object System.Windows.Forms.Timer
 $script:t.Interval = 5000
 $script:t.add_Tick({
     try {
-        $op = if ($script:alive) { 'beat' } else { 'list' }
+        $op = if ($script:alive) { 'beat&src=ps' } else { 'list' }
         $r = Api $op $false
         $l = @($r.list)
         Update-State $l
-        if ($script:alive) { $script:alive = [bool]($l | Where-Object { $_.on }) }
+        $script:alive = [bool]($l | Where-Object { $_.on })
         Sync $l
     } catch { }
     $script:t.Interval = if ($script:alive) { 5000 } else { 15000 }

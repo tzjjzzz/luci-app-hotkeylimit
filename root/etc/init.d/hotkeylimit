@@ -27,7 +27,7 @@ start_service() {
 
 stop_service() {
 	nft delete table inet hklimit 2>/dev/null
-	rm -f /tmp/hklimit.on
+	rm -rf /tmp/hklimit.on /tmp/hklimit.beat.d
 }
 
 service_triggers() {

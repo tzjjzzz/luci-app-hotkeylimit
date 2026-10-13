@@ -1,5 +1,5 @@
 #!/bin/sh
-# watchdog: (1) remove all limits when the controller stops sending heartbeats
+# watchdog: (1) a limit is removed when the controller that turned it on (client + page/script) stops sending heartbeats
 #           (2) copy changed settings to flash (at most once per 2s, only when something changed)
 . /usr/share/hotkeylimit/lib.sh
 T=${1:-20}
@@ -10,7 +10,17 @@ while sleep 2; do
 		cp "$BIND" "$PBIND" 2>/dev/null
 	fi
 	[ -s "$ONF" ] || continue
-	read -r b <"$BEAT" 2>/dev/null || b=0
 	n=$(now)
-	[ $((n - ${b:-0})) -gt "$T" ] && clear_all
+	changed=0
+	for o in $(awk '{print $2}' "$ONF" | sort -u); do
+		f=$(beat_file "$o")
+		read -r b <"$f" 2>/dev/null || b=0
+		if [ $((n - ${b:-0})) -gt "$T" ]; then
+			awk -v o="$o" '$2!=o' "$ONF" >"$ONF.t"
+			mv "$ONF.t" "$ONF"
+			rm -f "$f"
+			changed=1
+		fi
+	done
+	[ "$changed" = 1 ] && apply
 done

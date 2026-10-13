@@ -15,6 +15,13 @@ valid_val() {
 	case "$1" in "" | *[!0-9]*) return 1 ;; esac
 	return 0
 }
+# which controller sent this request: "web" (page) or "ps" (Windows script)
+get_src() {
+	local s
+	case "$QUERY_STRING" in *src=*) s=${QUERY_STRING#*src=}; s=${s%%&*} ;; *) s=web ;; esac
+	case "$s" in "" | *[!a-z0-9]*) s=web ;; esac
+	echo "$s"
+}
 valid_ip() { case "$1" in "" | *[!0-9.]*) return 1 ;; esac; return 0; }
 
 # "key" is this client's own hotkey for each device
@@ -61,9 +68,10 @@ list) # state only, does not count as heartbeat
 	hdr
 	out_state
 	;;
-beat) # heartbeat + state
+beat) # heartbeat (only counts for limits this controller turned on) + state
 	hdr
-	[ -s "$ONF" ] && now >"$BEAT"
+	cid
+	[ -s "$ONF" ] && owns_any "$CID.$(get_src)" && touch_beat "$CID.$(get_src)"
 	out_state
 	;;
 cfg) # add/update a device's limits and THIS client's hotkey for it
@@ -119,8 +127,10 @@ toggle)
 		set_off "$ip"
 		apply
 	else
-		set_on "$ip"
-		now >"$BEAT"
+		cid
+		OWNER="$CID.$(get_src)"
+		set_on "$ip" "$OWNER"
+		touch_beat "$OWNER"
 		apply || { set_off "$ip"; apply; jerr "nft: $ERR"; exit 0; }
 	fi
 	out_state

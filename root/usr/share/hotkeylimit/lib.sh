@@ -1,13 +1,13 @@
 # shared helpers. value: -1 = block, 0 = no limit, N>0 = limit to N KB/s
 # $CFG  lines: "ip up down"         (shared device limits)
 # $BIND lines: "client key ip"      (hotkey bindings, per client PC)
-# $ONF  lines: ips that are currently limited
+# $ONF  lines: "ip owner"  (limited devices and the controller that turned them on; owner = client.src)
 TB="inet hklimit"
 CH=hkchain
 CFG=/tmp/hklimit.cfg
 BIND=/tmp/hklimit.bind
 ONF=/tmp/hklimit.on
-BEAT=/tmp/hklimit.beat
+BEATD=/tmp/hklimit.beat.d   # one heartbeat file per owner
 NFT=/tmp/hklimit.nft
 DIRTY=/tmp/hklimit.dirty
 PCFG=/etc/hotkeylimit.cfg
@@ -28,9 +28,12 @@ cid() { [ -n "$CID" ] || CID=$(client_id); }
 key_for() { awk -v c="$CID" -v ip="$1" '$1==c && $3==ip {print $2; exit}' "$BIND" 2>/dev/null; }
 mark_dirty() { : >"$DIRTY"; }
 
-is_on() { grep -qxF "$1" "$ONF" 2>/dev/null; }
-set_on() { is_on "$1" || echo "$1" >>"$ONF"; }
-set_off() { [ -f "$ONF" ] || return 0; grep -vxF "$1" "$ONF" >"$ONF.t"; mv "$ONF.t" "$ONF"; }
+is_on() { awk -v ip="$1" '$1==ip{f=1} END{exit !f}' "$ONF" 2>/dev/null; }
+set_on() { { awk -v ip="$1" '$1!=ip' "$ONF" 2>/dev/null; echo "$1 $2"; } >"$ONF.t"; mv "$ONF.t" "$ONF"; }
+set_off() { [ -f "$ONF" ] || return 0; awk -v ip="$1" '$1!=ip' "$ONF" >"$ONF.t"; mv "$ONF.t" "$ONF"; }
+owns_any() { awk -v o="$1" '$2==o{f=1} END{exit !f}' "$ONF" 2>/dev/null; }
+beat_file() { printf '%s/%s' "$BEATD" "$(printf '%s' "$1" | tr ':' '_')"; }
+touch_beat() { mkdir -p "$BEATD"; now >"$(beat_file "$1")"; }
 has_cfg() { awk -v ip="$1" '$1==ip{f=1} END{exit !f}' "$CFG" 2>/dev/null; }
 
 rule_line() { # ip dir value
@@ -41,7 +44,7 @@ rule_line() { # ip dir value
 	esac
 }
 
-clear_all() { nft delete table $TB 2>/dev/null; rm -f "$ONF"; }
+clear_all() { nft delete table $TB 2>/dev/null; rm -f "$ONF"; rm -rf "$BEATD"; }
 
 # rebuild the whole ruleset atomically from $CFG + $ONF; returns 1 and sets ERR on failure
 apply() {

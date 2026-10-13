@@ -13,7 +13,7 @@ input,select{width:100%}button{cursor:pointer}
 <div id=list></div>
 <select id=add></select>
 <div class=g><button onclick=addDev()>添加设备</button><button onclick=addIp()>手动输入 IP</button><button onclick=allOff()>全部取消</button></div>
-<small>限速值所有电脑共用；热键按电脑分别保存（本机的热键只对应本机设置的设备，不同电脑可以用同一个键控制不同设备）。可同时限制多台。开启后修改数值即时生效。关闭本页或断线后，限制会在约 20 秒内自动取消。<br>
+<small>限速值所有电脑共用；热键按电脑分别保存（本机的热键只对应本机设置的设备，不同电脑可以用同一个键控制不同设备）。可同时限制多台。开启后修改数值即时生效。谁开启的限制，只有谁保持在线才会继续（本页开的限制，关闭本页约 20 秒后自动取消；热键脚本开的，脚本退出后同理）。<br>
 <a href="/cgi-bin/api?op=ps1">下载 Windows 全局热键脚本</a>（热键以本页设置为准）</small>
 <script>
 var $=function(i){return document.getElementById(i)},R={},D=[],names={},tms={},cap='',L=[];
@@ -46,13 +46,13 @@ function cfgOf(ip){var e=R[ip];return{ip:ip,up:parseInt(e.u.value),down:parseInt
 function ok(c){return c.up>=-1&&c.down>=-1}
 function sendCfg(ip){var c=cfgOf(ip);if(ok(c))api('cfg',c,render)}
 function later(ip){clearTimeout(tms[ip]);tms[ip]=setTimeout(function(){sendCfg(ip)},300)}
-function toggle(ip){clearTimeout(tms[ip]);var c=cfgOf(ip),go=function(){api('toggle',{ip:ip},render)};
+function toggle(ip){clearTimeout(tms[ip]);var c=cfgOf(ip),go=function(){api('toggle&src=web',{ip:ip},render)};
 if(ok(c))api('cfg',c,function(r){if(r.error)return render(r);go()});else go()}
 function add(ip){api('cfg',{ip:ip,up:-1,down:0,key:'-'},render)}
 function addDev(){var ip=$('add').value;if(ip)add(ip)}
 function addIp(){var ip=prompt('设备 IP');if(ip&&/^\d+(\.\d+){3}$/.test(ip))add(ip)}
 function allOff(){api('alloff',{},render)}
-function bt(){api('beat',0,render)}
+function bt(){api('beat&src=web',0,render)}
 function restore(i){if(i>=L.length)return bt();api('cfg',L[i],function(){restore(i+1)})}
 function init(){api('devices',0,function(r){D=r.devices||[];D.forEach(function(x){names[x.ip]=x.name});
 api('list',0,function(s){if(!(s.list||[]).length&&L.length)restore(0);else render(s)})})}
