@@ -22,8 +22,10 @@ $script:Swallow = $false
 # Press it again before the time is up -> OFF immediately.
 # Target = the WEB hotkey (set on the router page) of the device to control, e.g. 'F9'.
 #          Leave '' when only one web hotkey is set on this PC; with several web hotkeys it must be filled in.
-# The web hotkey itself keeps working as a normal on/off toggle.
-# Example:  $script:Timed = @( @{ Key = 'G'; Target = 'F'; Seconds = 5 } )
+# Cooldown (optional) = seconds after an AUTOMATIC off during which this timed key cannot turn the limit on again.
+#          A red countdown stays on screen for the whole cooldown. Stopping early with the key or a cancel key does not start it.
+# The web hotkey itself keeps working as a normal on/off toggle and is not affected by the cooldown.
+# Example:  $script:Timed = @( @{ Key = 'G'; Target = 'F'; Seconds = 5; Cooldown = 10 } )
 $script:Timed = @()
 
 # --- Optional: cancel keys --------------------------------------------------------------------
@@ -41,7 +43,11 @@ $script:map = @{}
 $script:st = @{}
 $script:last = @()
 $script:sig = ''
-$script:deadlines = @{}
+$script:deadlines = @{}     # ip -> when a timed limit ends
+$script:cool = @{}          # ip -> when the cooldown ends
+$script:coolFor = @{}       # ip -> cooldown seconds of the timed key that started it
+$script:stickyIp = $null    # device whose countdown is shown on screen
+$script:flashUntil = [datetime]::MinValue
 $script:pending = New-Object System.Collections.ArrayList
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -146,7 +152,8 @@ public class HotkeyWindow : NativeWindow {
     }
 }
 
-// small overlay shown instantly; each new message replaces the previous one (no queue, no Windows toast)
+// small overlay at the bottom centre of the screen; each new message replaces the previous one (no queue, no Windows toast)
+// kind: 0 = green (on), 1 = red (off / error), 2 = white (info).  sticky = stays until Clear().
 public class Toast : Form {
     Label lbl = new Label();
     System.Windows.Forms.Timer tm = new System.Windows.Forms.Timer();
@@ -156,10 +163,11 @@ public class Toast : Form {
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         Opacity = 0.92;
+        BackColor = Color.FromArgb(30, 30, 30);
+        lbl.BackColor = BackColor;
         lbl.AutoSize = true;
-        lbl.ForeColor = Color.White;
-        lbl.Font = new Font("Segoe UI", 12f);
-        lbl.Padding = new Padding(14, 10, 14, 10);
+        lbl.Font = new Font("Consolas", 14f, FontStyle.Bold);
+        lbl.Padding = new Padding(18, 10, 18, 10);
         lbl.Location = new Point(0, 0);
         Controls.Add(lbl);
         tm.Interval = 1500;
@@ -169,17 +177,17 @@ public class Toast : Form {
     protected override CreateParams CreateParams {
         get { CreateParams p = base.CreateParams; p.ExStyle |= 0x08000088; return p; } // NOACTIVATE | TOOLWINDOW | TOPMOST
     }
-    public void Say(string text, bool bad) {
-        BackColor = bad ? Color.FromArgb(150, 40, 40) : Color.FromArgb(30, 30, 30);
-        lbl.BackColor = BackColor;
+    public void Say(string text, int kind, bool sticky) {
+        lbl.ForeColor = kind == 0 ? Color.FromArgb(90, 230, 110) : (kind == 1 ? Color.FromArgb(255, 95, 95) : Color.White);
         lbl.Text = text;
         ClientSize = lbl.GetPreferredSize(Size.Empty);
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-        Location = new Point(wa.Right - Width - 20, wa.Bottom - Height - 20);
+        Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - 80);
         if (!Visible) Show();
         tm.Stop();
-        tm.Start();
+        if (!sticky) tm.Start();
     }
+    public void Clear() { tm.Stop(); Hide(); }
 }
 '@
 
@@ -225,7 +233,16 @@ function Pump-Net {
 
 # ---------- helpers ----------
 function V($n) { if ($n -lt 0) { 'blocked' } elseif ($n -eq 0) { 'unlimited' } else { "$n KB/s" } }
-function Notify([string]$msg, [bool]$bad = $false) { $script:toast.Say($msg, $bad) }
+# kind: 'on' (green) | 'off' (red) | 'err' (red) | 'info' (white). Shown for ~1.5 s, then any running countdown comes back.
+function Notify([string]$msg, [string]$kind = 'info') {
+    if ($kind -eq 'on') { $c = 0 } elseif ($kind -eq 'off' -or $kind -eq 'err') { $c = 1 } else { $c = 2 }
+    $script:flashUntil = (Get-Date).AddMilliseconds(1450)
+    $script:toast.Say($msg, $c, $false)
+}
+function Fmt([double]$sec) {
+    if ($sec -lt 0) { $sec = 0 }
+    return $sec.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
+}
 function Get-VK([string]$k) {
     $k = $k.Trim().ToUpper()
     if ($k -match '^F(\d{1,2})$') {
@@ -274,7 +291,7 @@ function Sync($list) {
         $id++
     }
     $script:sig = $sig
-    if ($failed.Count -gt 0) { Notify ("Unsupported hotkey: " + ($failed -join ', ') + " (use F1-F24, A-Z, 0-9, Pause, ScrollLock, Insert, Home, End, PageUp, PageDown)") $true }
+    if ($failed.Count -gt 0) { Notify ("Unsupported hotkey: " + ($failed -join ', ') + " (use F1-F24, A-Z, 0-9, Pause, ScrollLock, Insert, Home, End, PageUp, PageDown)") 'err' }
 }
 # the web hotkey (e.g. 'F') a timed key points at -> device ip
 function Resolve-Target([string]$t) {
@@ -282,65 +299,107 @@ function Resolve-Target([string]$t) {
     if ($t) {
         $m = $bound | Where-Object { $_.key -ieq $t } | Select-Object -First 1
         if ($m) { return [string]$m.ip }
-        Notify "No device has web hotkey '$t' on this PC" $true
+        Notify "No device has web hotkey '$t' on this PC" 'err'
         return $null
     }
     if ($bound.Count -eq 1) { return [string]$bound[0].ip }
-    if ($bound.Count -eq 0) { Notify 'No web hotkey is set on this PC' $true; return $null }
-    Notify 'Several web hotkeys exist: set Target for the timed key' $true
+    if ($bound.Count -eq 0) { Notify 'No web hotkey is set on this PC' 'err'; return $null }
+    Notify 'Several web hotkeys exist: set Target for the timed key' 'err'
     return $null
 }
 
 # ---------- reply handlers (called from Pump-Net on the UI thread) ----------
-function H-Fail($ctx) { Notify 'Cannot reach router' $true }
+function H-Fail($ctx) {
+    if ($ctx.ip) { $script:deadlines.Remove([string]$ctx.ip); Update-Armed }
+    Notify 'Cannot reach router' 'err'
+}
 function H-Quiet($ctx) { }
 function H-Tick($r, $ctx) { $l = @($r.list); Update-State $l; Sync $l }
-function H-Start($r, $ctx) { $l = @($r.list); Update-State $l; Sync $l; Notify 'Hotkey Limit running' }
-function H-StartFail($ctx) { Notify 'Router not reachable yet, will keep trying' $true }
+function H-Start($r, $ctx) { $l = @($r.list); Update-State $l; Sync $l; Notify 'Hotkey Limit running' 'info' }
+function H-StartFail($ctx) { Notify 'Router not reachable yet, will keep trying' 'err' }
 function H-Result($r, $ctx) {
     $ip = [string]$ctx.ip
-    if ($r.error) { $script:deadlines.Remove($ip); Update-Armed; Notify ([string]$r.error) $true; return }
+    if ($r.error) { $script:deadlines.Remove($ip); Update-Armed; Notify ([string]$r.error) 'err'; return }
     $l = @($r.list)
     Update-State $l
+    # a running timed limit is already shown by its green countdown
+    if ($script:deadlines.ContainsKey($ip)) { return }
     $d = $l | Where-Object { $_.ip -eq $ip } | Select-Object -First 1
-    if ($d -and $d.on) {
-        $extra = ''
-        if ($script:deadlines.ContainsKey($ip)) {
-            $left = [int][math]::Ceiling(($script:deadlines[$ip] - (Get-Date)).TotalSeconds)
-            if ($left -gt 0) { $extra = "   (auto OFF in ${left}s)" }
-        }
-        Notify "$ip  ON   up: $(V $d.up)   down: $(V $d.down)$extra"
+    if ($d -and $d.on) { Notify "$ip  ON   up: $(V $d.up)   down: $(V $d.down)" 'on' }
+    else { Notify "$ip  OFF" 'off' }
+}
+
+# ---------- countdown on screen ----------
+# green "ON  x.xs" while a timed limit runs, red "OFF  cooldown x.xs" during the cooldown
+function Show-Sticky {
+    $ip = $script:stickyIp
+    if (-not $ip) { return }
+    $now = Get-Date
+    if ($script:deadlines.ContainsKey($ip)) {
+        $text = "$ip  ON   " + (Fmt (($script:deadlines[$ip] - $now).TotalSeconds)) + 's'; $kind = 0
+    } elseif ($script:cool.ContainsKey($ip)) {
+        $text = "$ip  OFF   cooldown " + (Fmt (($script:cool[$ip] - $now).TotalSeconds)) + 's'; $kind = 1
     } else {
-        Notify "$ip  OFF"
+        $script:stickyIp = $null
+        if ($now -ge $script:flashUntil) { $script:toast.Clear() }
+        return
+    }
+    if ($now -ge $script:flashUntil) { $script:toast.Say($text, $kind, $true) }
+}
+function Expire-Timers {
+    $now = Get-Date
+    foreach ($ip in @($script:deadlines.Keys)) {
+        if ($now -ge $script:deadlines[$ip]) {
+            Do-Off $ip 'time up'                       # removes the deadline and tells the router
+            $cd = [double]$script:coolFor[$ip]
+            if ($cd -gt 0) { $script:cool[$ip] = $now.AddSeconds($cd); $script:stickyIp = $ip }
+        }
+    }
+    foreach ($ip in @($script:cool.Keys)) {
+        if ($now -ge $script:cool[$ip]) { $script:cool.Remove($ip) }
     }
 }
 
 # ---------- actions ----------
 function Do-Toggle([string]$ip) {
     $script:deadlines.Remove($ip)      # manual use takes over from a running timer
-    if ($script:st[$ip]) { Notify "$ip  OFF ..." } else { Notify "$ip  ON ..." }
+    if ($script:st[$ip]) { Notify "$ip  OFF ..." 'off' } else { Notify "$ip  ON ..." 'on' }
     Send-Api 'toggle&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip } 'H-Fail'
 }
-function Do-On([string]$ip, [double]$secs) {
-    Notify "$ip  ON ..."
+function Do-On([string]$ip, [double]$secs, [double]$cool) {
     if ($secs -gt 0) {
         $script:deadlines[$ip] = (Get-Date).AddSeconds($secs)   # counted from the key press
+        $script:coolFor[$ip] = $cool
+        $script:stickyIp = $ip
+        $script:flashUntil = [datetime]::MinValue
         $script:dlTimer.Start()
         Update-Armed
+        Show-Sticky
+    } else {
+        Notify "$ip  ON ..." 'on'
     }
     Send-Api 'on&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip } 'H-Fail'
 }
 function Do-Off([string]$ip, [string]$why) {
     $script:deadlines.Remove($ip)
-    if ($why) { Notify "$ip  OFF ($why) ..." } else { Notify "$ip  OFF ..." }
+    if ($why) { Notify "$ip  OFF ($why) ..." 'off' } else { Notify "$ip  OFF ..." 'off' }
     Send-Api 'off&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip } 'H-Fail'
 }
 function Do-Timed([int]$i) {
     $e = @($script:Timed)[$i]
     $ip = Resolve-Target ([string]$e.Target)
     if (-not $ip) { return }
-    if ($script:deadlines.ContainsKey($ip)) { Do-Off $ip 'timed key' }   # pressed again inside the time window
-    else { Do-On $ip ([double]$e.Seconds) }
+    $now = Get-Date
+    if ($script:cool.ContainsKey($ip) -and $now -lt $script:cool[$ip]) {
+        # still cooling down: not allowed, the red countdown is (re)shown
+        $script:stickyIp = $ip
+        $script:flashUntil = [datetime]::MinValue
+        $script:dlTimer.Start()
+        Show-Sticky
+        return
+    }
+    if ($script:deadlines.ContainsKey($ip)) { Do-Off $ip 'timed key' }   # pressed again inside the time window: no cooldown
+    else { Do-On $ip ([double]$e.Seconds) ([double]$e.Cooldown) }
 }
 function Do-Cancel {
     if ($script:CancelScope -eq 'timed') {
@@ -371,15 +430,13 @@ $script:t.add_Tick({
     Send-Api $op $false '' 'H-Tick' @{} 'H-Quiet'
     $script:t.Interval = if ($script:alive) { 5000 } else { 15000 }
 })
-# ends timed limits
+# ends timed limits, runs cooldowns, refreshes the on-screen countdown
 $script:dlTimer = New-Object System.Windows.Forms.Timer
 $script:dlTimer.Interval = 100
 $script:dlTimer.add_Tick({
-    $now = Get-Date
-    foreach ($ip in @($script:deadlines.Keys)) {
-        if ($now -ge $script:deadlines[$ip]) { Do-Off $ip 'time up' }
-    }
-    if ($script:deadlines.Count -eq 0) { $script:dlTimer.Stop() }
+    Expire-Timers
+    Show-Sticky
+    if ($script:deadlines.Count -eq 0 -and $script:cool.Count -eq 0) { $script:dlTimer.Stop() }
     Update-Armed
 })
 
@@ -405,7 +462,7 @@ $bad = @()
 $i = 0
 foreach ($e in @($script:Timed)) {
     $vk = Get-VK ([string]$e.Key)
-    if ($null -eq $vk -or -not ($e.Seconds -gt 0)) { $bad += "timed:$($e.Key)" }
+    if ($null -eq $vk -or -not ($e.Seconds -gt 0) -or ($e.Cooldown -and -not ($e.Cooldown -ge 0))) { $bad += "timed:$($e.Key)" }
     else { [void]$script:hkw.Register(2000 + $i, [uint32]$vk) }
     $i++
 }
@@ -429,7 +486,7 @@ if (-not $script:hkw.SetMouse($mask)) { $bad += 'mouse hook' }
 Update-Armed
 
 Send-Api 'list' $false '' 'H-Start' @{} 'H-StartFail'
-if ($bad.Count -gt 0) { Notify ("Invalid config: " + ($bad -join ', ')) $true }
+if ($bad.Count -gt 0) { Notify ("Invalid config: " + ($bad -join ', ')) 'err' }
 $script:t.Start()
 
 [System.Windows.Forms.Application]::Run()
