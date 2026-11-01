@@ -168,7 +168,11 @@ alloff)
 ps1)
 	h=$(printf '%s' "$HTTP_HOST" | tr -cd 'A-Za-z0-9.:_-')
 	printf 'Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="hotkey.ps1"\r\nCache-Control: no-store\r\n\r\n'
-	sed -e "s|__HOST__|$h|" /usr/share/hotkeylimit/hotkey.ps1.tpl
+	case "$QUERY_STRING" in
+	*lang=zh*) tpl=/usr/share/hotkeylimit/hotkey.ps1.zh.tpl ;;
+	*) tpl=/usr/share/hotkeylimit/hotkey.ps1.tpl ;;
+	esac
+	sed -e "s|__HOST__|$h|" "$tpl"
 	;;
 *)
 	hdr
