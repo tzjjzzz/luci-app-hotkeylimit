@@ -23,10 +23,15 @@ $script:Swallow = $false
 # Target = the WEB hotkey (set on the router page) of the device to control, e.g. 'F9'.
 #          Leave '' when only one web hotkey is set on this PC; with several web hotkeys it must be filled in.
 # Cooldown (optional) = seconds after an AUTOMATIC off during which this timed key cannot turn the limit on again.
-#          A red countdown stays on screen for the whole cooldown. Stopping early with the key or a cancel key does not start it.
+#          A red countdown stays on screen for the whole cooldown. A timed key without Cooldown has no cooldown at all.
 # The web hotkey itself keeps working as a normal on/off toggle and is not affected by the cooldown.
 # Example:  $script:Timed = @( @{ Key = 'G'; Target = 'F'; Seconds = 5; Cooldown = 10 } )
 $script:Timed = @()
+# CooldownAlways:
+#   $false (default) = the cooldown only starts after an AUTOMATIC off (the time ran out).
+#   $true            = the cooldown starts however a timed limit ends: automatic off, pressing the timed key again,
+#                      a cancel key (mouse...), the web hotkey, or being switched off from the web page / another device.
+$script:CooldownAlways = $false
 
 # --- Optional: cancel keys --------------------------------------------------------------------
 # Pressing any of these turns the limit OFF (it never turns it ON). The key/button still works normally.
@@ -48,6 +53,7 @@ $script:cool = @{}          # ip -> when the cooldown ends
 $script:coolFor = @{}       # ip -> cooldown seconds of the timed key that started it
 $script:stickyIp = $null    # device whose countdown is shown on screen
 $script:flashUntil = [datetime]::MinValue
+$script:timedOk = @{}       # ip -> when the router confirmed a timed limit is ON (used to notice it was ended elsewhere)
 $script:pending = New-Object System.Collections.ArrayList
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -271,6 +277,15 @@ function Update-State($l) {
     $script:last = @($l)
     $script:st = @{}
     foreach ($d in $l) { $script:st[[string]$d.ip] = [bool]$d.on }
+    # a timed limit that was confirmed ON but now shows OFF was ended elsewhere (web page, phone, ...)
+    # (3 s guard so a reply that was already in flight cannot be mistaken for that)
+    foreach ($tip in @($script:timedOk.Keys)) {
+        if (-not $script:deadlines.ContainsKey($tip)) { $script:timedOk.Remove($tip); continue }
+        if (-not $script:st[$tip] -and ((Get-Date) - $script:timedOk[$tip]).TotalSeconds -gt 3) {
+            Clear-Timed $tip
+            if ($script:CooldownAlways) { [void](Start-Cool $tip) }
+        }
+    }
     $script:alive = [bool](@($l) | Where-Object { $_.on })
     if ($script:alive -and $script:t.Interval -gt 5000) { $script:t.Interval = 5000 }
     Update-Armed
@@ -308,9 +323,22 @@ function Resolve-Target([string]$t) {
     return $null
 }
 
+# ---------- timers / cooldown bookkeeping ----------
+function Clear-Timed([string]$ip) { $script:deadlines.Remove($ip); $script:timedOk.Remove($ip) }
+# starts the cooldown of the timed key that controls this device; $false when that timed key has no Cooldown
+function Start-Cool([string]$ip) {
+    $cd = [double]$script:coolFor[$ip]
+    if ($cd -le 0) { return $false }
+    $script:cool[$ip] = (Get-Date).AddSeconds($cd)
+    $script:stickyIp = $ip
+    $script:flashUntil = [datetime]::MinValue
+    $script:dlTimer.Start()
+    return $true
+}
+
 # ---------- reply handlers (called from Pump-Net on the UI thread) ----------
 function H-Fail($ctx) {
-    if ($ctx.ip) { $script:deadlines.Remove([string]$ctx.ip); Update-Armed }
+    if ($ctx.ip) { Clear-Timed ([string]$ctx.ip); Update-Armed }
     Notify 'Cannot reach router' 'err'
 }
 function H-Quiet($ctx) { }
@@ -319,12 +347,14 @@ function H-Start($r, $ctx) { $l = @($r.list); Update-State $l; Sync $l; Notify '
 function H-StartFail($ctx) { Notify 'Router not reachable yet, will keep trying' 'err' }
 function H-Result($r, $ctx) {
     $ip = [string]$ctx.ip
-    if ($r.error) { $script:deadlines.Remove($ip); Update-Armed; Notify ([string]$r.error) 'err'; return }
+    if ($r.error) { Clear-Timed $ip; Update-Armed; Notify ([string]$r.error) 'err'; return }
     $l = @($r.list)
     Update-State $l
-    # a running timed limit is already shown by its green countdown
-    if ($script:deadlines.ContainsKey($ip)) { return }
     $d = $l | Where-Object { $_.ip -eq $ip } | Select-Object -First 1
+    if ($d -and $d.on -and $script:deadlines.ContainsKey($ip) -and -not $script:timedOk.ContainsKey($ip)) { $script:timedOk[$ip] = Get-Date }
+    # a running timed limit is already shown by its green countdown; a quiet reply (a stop that starts a
+    # cooldown) must not flash "OFF" over the red countdown
+    if ($script:deadlines.ContainsKey($ip) -or $ctx.quiet) { return }
     if ($d -and $d.on) { Notify "$ip  ON   up: $(V $d.up)   down: $(V $d.down)" 'on' }
     else { Notify "$ip  OFF" 'off' }
 }
@@ -350,9 +380,8 @@ function Expire-Timers {
     $now = Get-Date
     foreach ($ip in @($script:deadlines.Keys)) {
         if ($now -ge $script:deadlines[$ip]) {
-            Do-Off $ip 'time up'                       # removes the deadline and tells the router
-            $cd = [double]$script:coolFor[$ip]
-            if ($cd -gt 0) { $script:cool[$ip] = $now.AddSeconds($cd); $script:stickyIp = $ip }
+            # time ran out: if there is a cooldown show the red countdown at once, no "OFF" flash in between
+            if (Start-Cool $ip) { Do-Off $ip 'time up' $true } else { Do-Off $ip 'time up' $false }
         }
     }
     foreach ($ip in @($script:cool.Keys)) {
@@ -362,12 +391,18 @@ function Expire-Timers {
 
 # ---------- actions ----------
 function Do-Toggle([string]$ip) {
-    $script:deadlines.Remove($ip)      # manual use takes over from a running timer
-    if ($script:st[$ip]) { Notify "$ip  OFF ..." 'off' } else { Notify "$ip  ON ..." 'on' }
-    Send-Api 'toggle&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip } 'H-Fail'
+    $quiet = $false
+    # F switches a running timed limit off by hand: with CooldownAlways this also starts the cooldown
+    if ($script:CooldownAlways -and $script:deadlines.ContainsKey($ip) -and (Start-Cool $ip)) { $quiet = $true }
+    Clear-Timed $ip                    # manual use takes over from a running timer
+    if (-not $quiet) {
+        if ($script:st[$ip]) { Notify "$ip  OFF ..." 'off' } else { Notify "$ip  ON ..." 'on' }
+    }
+    Send-Api 'toggle&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip; quiet = $quiet } 'H-Fail'
 }
 function Do-On([string]$ip, [double]$secs, [double]$cool) {
     if ($secs -gt 0) {
+        $script:timedOk.Remove($ip)
         $script:deadlines[$ip] = (Get-Date).AddSeconds($secs)   # counted from the key press
         $script:coolFor[$ip] = $cool
         $script:stickyIp = $ip
@@ -380,10 +415,18 @@ function Do-On([string]$ip, [double]$secs, [double]$cool) {
     }
     Send-Api 'on&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip } 'H-Fail'
 }
-function Do-Off([string]$ip, [string]$why) {
-    $script:deadlines.Remove($ip)
-    if ($why) { Notify "$ip  OFF ($why) ..." 'off' } else { Notify "$ip  OFF ..." 'off' }
-    Send-Api 'off&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip } 'H-Fail'
+function Do-Off([string]$ip, [string]$why, [bool]$quiet = $false) {
+    Clear-Timed $ip
+    if (-not $quiet) {
+        if ($why) { Notify "$ip  OFF ($why) ..." 'off' } else { Notify "$ip  OFF ..." 'off' }
+    }
+    Send-Api 'off&src=ps' $true "{`"ip`":`"$ip`"}" 'H-Result' @{ ip = $ip; quiet = $quiet } 'H-Fail'
+}
+# stop by hand (timed key pressed again / cancel key): cooldown only with CooldownAlways
+function Do-Stop([string]$ip, [string]$why) {
+    $quiet = $false
+    if ($script:CooldownAlways -and $script:deadlines.ContainsKey($ip) -and (Start-Cool $ip)) { $quiet = $true }
+    Do-Off $ip $why $quiet
 }
 function Do-Timed([int]$i) {
     $e = @($script:Timed)[$i]
@@ -398,7 +441,7 @@ function Do-Timed([int]$i) {
         Show-Sticky
         return
     }
-    if ($script:deadlines.ContainsKey($ip)) { Do-Off $ip 'timed key' }   # pressed again inside the time window: no cooldown
+    if ($script:deadlines.ContainsKey($ip)) { Do-Stop $ip 'timed key' }   # pressed again inside the time window
     else { Do-On $ip ([double]$e.Seconds) ([double]$e.Cooldown) }
 }
 function Do-Cancel {
@@ -408,7 +451,7 @@ function Do-Cancel {
         $bound = @($script:last | Where-Object { $_.key -and $_.key -ne '-' } | ForEach-Object { [string]$_.ip })
         $ips = @($bound | Where-Object { $script:st[$_] })
     }
-    foreach ($ip in $ips) { Do-Off $ip 'cancel key' }
+    foreach ($ip in $ips) { Do-Stop $ip 'cancel key' }
 }
 
 # ---------- UI objects ----------
